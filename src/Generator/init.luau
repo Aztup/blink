@@ -1216,6 +1216,12 @@ function Generator.Generate(FileContext: Context, AbstractSyntaxTree: Parser.Bod
 	Reliables:Lines(EVENT_BODY, 1)
 	Unreliables:Lines(EVENT_BODY, 1)
 
+	--> Drop malicious buffer before parsing (server only)
+	if Context == "Server" then
+		Reliables:Line("if Size > MAX_PACKET_SIZE then return end")
+		Unreliables:Line("if Size > MAX_PACKET_SIZE then return end")
+	end
+
 	if Options.SyncValidation then
 		Reliables:Lines(EVENT_SYNC_VALIDATION, 1)
 		Unreliables:Lines(EVENT_SYNC_VALIDATION, 1)

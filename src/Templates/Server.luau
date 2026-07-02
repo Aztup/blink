@@ -23,6 +23,14 @@ if not Unreliable then
     Unreliable = UnreliableRemoteEvent
 end
 
+-- Maximum size (in bytes) of an incoming packet buffer.
+-- Packets larger than this are dropped before the receive loop runs
+-- Roblox compresses remote payloads on the wire, so a client can cheaply send a
+-- buffer that decompresses to tens of MB and stalls the main thread.
+-- Can be tuned to whatever value fits you the best
+-- Default: 100kb
+local MAX_PACKET_SIZE = 100 * 1024
+
 local PlayersMap: {[Player]: BufferSave} = {}
 
 Players.PlayerRemoving:Connect(function(Player)
