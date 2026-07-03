@@ -64,6 +64,9 @@ local function GetEnvironment()
 			IsRunning = function(self)
 				return true
 			end,
+			IsStudio = function(self)
+				return false
+			end
 		},
 	}
 

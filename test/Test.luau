@@ -331,6 +331,37 @@ local function QueueAndExpect(Name: string, OutgoingEvent: any, IncomingEvent: a
 	OkPrint(`Test "{Name}" passed!`)
 end
 
+--> Fires an unlistened event whose payload is too large / too deeply nested to safely
+--> retain, lets it sit in the queue (where it must be dropped, not retained), then
+--> connects a listener and asserts the dropped entry is never delivered.
+local function QueueAndDrop(Name: string, OutgoingEvent: any, IncomingEvent: any, Data: any)
+	PrettyPrint("cyan", `Testing: {Name}...`, true)
+
+	local Result: unknown
+	if OutgoingEvent.FireAll then
+		OutgoingEvent.FireAll(Data)
+	else
+		OutgoingEvent.Fire(Data)
+	end
+
+	--> Let it sit in the queue; an oversized/too-deep entry is dropped here
+	task.wait(0.5)
+
+	local Disconnect = IncomingEvent.On(function(First, Second)
+		Result = if Second ~= nil then Second else First
+	end)
+
+	--> Wait for the queue to (attempt to) drain
+	task.wait(1 / 30)
+
+	if Result ~= nil then
+		ErrorPrint(`Failed "{Name}", expected the queued entry to be dropped, but the listener received a value.`)
+	end
+
+	Disconnect()
+	OkPrint(`Test "{Name}" passed!`)
+end
+
 local function FireAndExpectAll(Name: string, OutgoingEvent: any, IncomingEvent: any, Values: { any })
 	PrettyPrint("cyan", `Testing: {Name}...`, true)
 
@@ -734,6 +765,25 @@ QueueAndExpect("Many Reliable Async Queue", Server.ManyReliableAsync, Client.Man
 
 FireAndFail("Invalid Instance Any", Server.InstanceAny, Client.InstanceAny, true)
 FireAndFail("Invalid Instance Type", Server.InstanceOfType, Client.InstanceOfType, InstanceNeverIsA)
+
+--> Server-side per-player queue memory cap. `unknown` payloads ride in the un-type-checked
+--> Instances array, so an unlistened one that is too large or too deeply nested must be
+--> dropped (not retained) to guard against OOM. A small one still queues and drains normally.
+QueueAndExpect("Queue Unknown (small)", Client.ClientUnknown, Server.ClientUnknown, buffer.fromstring("hello"))
+QueueAndDrop("Queue Unknown too big", Client.ClientUnknown, Server.ClientUnknown, buffer.create(2 * 1024 * 1024))
+
+local DeepUnknown: { any } = {}
+do
+	local Cursor = DeepUnknown
+	--> Nest deeper than QUEUE_MEASURE_MAX_DEPTH (8) while staying tiny in total size, so the
+	--> entry is dropped specifically by the depth guard rather than the size guard.
+	for _ = 1, 16 do
+		local Next: { any } = {}
+		Cursor[1] = Next
+		Cursor = Next
+	end
+end
+QueueAndDrop("Queue Unknown too deep", Client.ClientUnknown, Server.ClientUnknown, DeepUnknown)
 
 FireAndExpectAll("Correct order", Server.ReliableServer, Client.ReliableServer, { 1, 2, 3, 4 })
 FireAndExpectAll(
