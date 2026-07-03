@@ -138,4 +138,10 @@ local Queue: any = {
     Unreliable = table.create(256)
 }
 
+--> Running byte total of each queue, per player, used to cap queue memory (server only).
+local QueueSize: any = {
+    Reliable = table.create(256),
+    Unreliable = table.create(256)
+}
+
 ]]

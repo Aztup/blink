@@ -322,6 +322,7 @@ function Declarations.Event(Declaration: Parser.Event)
 
 	local Index = Channel.Count
 	local Queue = `Queue.{Reliability}[{Index}]`
+	local QueueSize = `QueueSize.{Reliability}[{Index}]`
 	local Connection = `Events.{Reliability}[{Index}]`
 
 	--> Data body
@@ -356,6 +357,9 @@ function Declarations.Event(Declaration: Parser.Event)
 		end
 
 		Events.Push(`{Queue} = table.create(256)`)
+		if Context == "Server" then
+			Events.Push(`{QueueSize} = \{}`)
+		end
 		Block = (Channel.Listening == false) and Block:Compare("Index", Index, "Equals")
 			or Block:Branch("Conditional", "Index", Index, "Equals")
 
@@ -409,14 +413,32 @@ function Declarations.Event(Declaration: Parser.Event)
 					:End()
 			end
 
-			ListenerBound:Branch("Default")
-				:Compare(`#{Queue}`, "256", "Greater")
-				:Line(
-					`warn("[Blink]: Event queue of \\"{Declaration.Name}\\" exceeded 256, did you forget to implement a listener?")`
-				)
-				:End()
-				:Line(`table.insert({Queue}, \{{ListenerArguments}\} :: \{any\})`)
-				:End()
+			if Context == "Server" then
+				--> Cap unlistened queue growth by memory, per player: drop in a live game, keep in Studio.
+				ListenerBound:Branch("Default")
+					:Line(`local EntrySize = (RecieveCursor - EntryStart) + QUEUE_ENTRY_OVERHEAD + QueuedInstancesSize(EntryInstanceStart, RecieveInstanceCursor)`)
+					:Line(`local PlayerQueueSize = {QueueSize}[Player] or 0`)
+					:Line(`local Exceeded = PlayerQueueSize + EntrySize > MAX_QUEUE_MEMORY`)
+					:Compare("Exceeded", "true", "Equals")
+						:Line(
+							`warn("[Blink]: Event queue of \\"{Declaration.Name}\\" exceeded MAX_QUEUE_MEMORY bytes for a player, did you forget to implement a listener?")`
+						)
+						:End()
+					:Compare("(not Exceeded or IsStudio)", "true", "Equals")
+						:Line(`{QueueSize}[Player] = PlayerQueueSize + EntrySize`)
+						:Line(`table.insert({Queue}, \{{ListenerArguments}\} :: \{any\})`)
+						:End()
+					:End()
+			else
+				ListenerBound:Branch("Default")
+					:Compare(`#{Queue}`, "256", "Greater")
+					:Line(
+						`warn("[Blink]: Event queue of \\"{Declaration.Name}\\" exceeded 256, did you forget to implement a listener?")`
+					)
+					:End()
+					:Line(`table.insert({Queue}, \{{ListenerArguments}\} :: \{any\})`)
+					:End()
+			end
 
 			Listener = Blocks.Function(Casing.On, ContextArguments, `() -> ()`, true)
 				:Line(IsSingle and `{Connection} = Listener` or `table.insert({Connection}, Listener)`)
@@ -424,7 +446,10 @@ function Declarations.Event(Declaration: Parser.Event)
 				:Line(IsSync and `Listener(table.unpack(Arguments))` or `task.spawn(Listener, table.unpack(Arguments))`)
 				:End()
 				:Line(`{Queue} = \{}`)
-				:Lines(Disconnect.Content, 1)
+			if Context == "Server" then
+				Listener:Line(`{QueueSize} = \{}`)
+			end
+			Listener:Lines(Disconnect.Content, 1)
 				:End()
 		else
 			if IsSingle then
@@ -615,6 +640,7 @@ function Declarations.Function(Declaration: Parser.Function)
 
 	local Index = Channel.Count
 	local Queue = `Queue.Reliable[{Index}]`
+	local QueueSize = `QueueSize.Reliable[{Index}]`
 	local Connection = `Events.Reliable[{Index}]`
 
 	--> Data and return body
@@ -651,6 +677,9 @@ function Declarations.Function(Declaration: Parser.Function)
 
 	--> Create queue and event branch
 	Events.Push(`{Queue} = table.create(256)`)
+	if Context == "Server" then
+		Events.Push(`{QueueSize} = \{}`)
+	end
 	Block = (Channel.Listening == false) and Block:Compare("Index", Index, "Equals")
 		or Block:Branch("Conditional", "Index", Index, "Equals")
 
@@ -664,16 +693,23 @@ function Declarations.Function(Declaration: Parser.Function)
 			:Compare(Connection, "nil", "Not")
 			:Line(`task.spawn({Connection}, Player, {DataArguments}, InvocationIdentifier)`)
 			:Branch("Default")
-			:Compare(`#{Queue}`, "256", "Greater")
-			:Line(`warn("[Blink]: Event queue of \\"{Name}\\" exceeded 256, did you forget to implement a listener?")`)
-			:End()
-			:Line(`table.insert({Queue}, \{Player, {DataArguments}, InvocationIdentifier\} :: \{any\})`)
-			:End()
+				:Line(`local EntrySize = (RecieveCursor - EntryStart) + QUEUE_ENTRY_OVERHEAD + QueuedInstancesSize(EntryInstanceStart, RecieveInstanceCursor)`)
+				:Line(`local PlayerQueueSize = {QueueSize}[Player] or 0`)
+				:Line(`local Exceeded = PlayerQueueSize + EntrySize > MAX_QUEUE_MEMORY`)
+				:Compare("Exceeded", "true", "Equals")
+					:Line(`warn("[Blink]: Event queue of \\"{Name}\\" exceeded MAX_QUEUE_MEMORY bytes for a player, did you forget to implement a listener?")`)
+					:End()
+				:Compare("(not Exceeded or IsStudio)", "true", "Equals")
+					:Line(`{QueueSize}[Player] = PlayerQueueSize + EntrySize`)
+					:Line(`table.insert({Queue}, \{Player, {DataArguments}, InvocationIdentifier\} :: \{any\})`)
+					:End()
+				:End()
 
 		--> Data listener body
 		local FlushQueue = Blocks.Function("", "", "()")
 			:Line(`local EventQueue = {Queue} or \{\}`)
 			:Line(`{Queue} = nil`)
+			:Line(`{QueueSize} = \{}`)
 			:Iterator("Index", "Arguments", "EventQueue")
 			:Line(`{Connection}(table.unpack(Arguments))`)
 			:End()
@@ -1231,6 +1267,15 @@ function Generator.Generate(FileContext: Context, AbstractSyntaxTree: Parser.Bod
 	Unreliables = Unreliables:While("RecieveCursor < Size")
 	Types.u8.Read("Index", Reliables)
 	Types.u8.Read("Index", Unreliables)
+
+	--> Capture the read cursors so queued events can be charged against MAX_QUEUE_MEMORY.
+	--> The instance cursor lets us count the (untyped, client-controlled) Instances a
+	--> queued entry retains. Only reliable events are queued when unlistened, so only the
+	--> reliable channel needs this.
+	if Context == "Server" then
+		Reliables:Line("local EntryStart = RecieveCursor")
+		Reliables:Line("local EntryInstanceStart = RecieveInstanceCursor")
+	end
 
 	--> Import async libraries
 	if Options.FutureLibrary then
